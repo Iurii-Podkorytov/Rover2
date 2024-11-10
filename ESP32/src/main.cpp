@@ -2,18 +2,25 @@
 #include <BluetoothSerial.h>
 #include "esp32-hal-ledc.h"
 #include "FastLED.h"
-// #include <AsyncTimer.h>
+#include <AsyncTimer.h>
 
-#define in(a, x, y) (a >= x && a < y) 
+#define DEBUG_ENABLE // Un-comment for debug
+#ifdef DEBUG_ENABLE
+#define DEBUG(x) Serial.println(x)
+#else
+#define DEBUG(x)
+#endif
 
+#define in(a, x, y) (a >= x && a <= y) 
+
+// API
 #define STOP 0
 #define JOYSTICK 1
 #define LID 2
 #define LID_OPEN 1
 #define LID_CLOSE 0
-#define AUDIO 3
 
-// AsyncTimer timer;
+AsyncTimer timer;
 BluetoothSerial SerialBT;
 
 // PWM setting
@@ -22,8 +29,8 @@ const int pwmChannelL1 = 0;
 const int pwmChannelL2 = 1;
 const int pwmChannelR1 = 2;
 const int pwmChannelR2 = 3;
-const int pwmChannelLID1 = 4;
-const int pwmChannelLID2 = 5;
+const int pwmChannelLid1 = 4;
+const int pwmChannelLid2 = 5;
 
 const int resolution = 8;
 
@@ -36,194 +43,272 @@ const int max_speed = pow(2, resolution)-1;
 #define MOTOR_L1 33 // D2
 #define MOTOR_L2 32 // D3
 
-#define LEDS_PIN 14 // HIGH on start up. Leds will blink white
-
-const uint8_t num_leds = 24;
-CRGB leds[num_leds];
-uint8_t anim_id;
 struct motor {
     uint8_t in1;
     uint8_t in2;
     uint8_t channel1;
     uint8_t channel2;
     int speed;
+    bool reversed;
 };
 
-motor motorL = {MOTOR_L1, MOTOR_L2, pwmChannelL1, pwmChannelL2, 0};
-motor motorR = {MOTOR_R1, MOTOR_R2, pwmChannelR1, pwmChannelR2, 0};
-motor motorLid = {MOTOR_LID1, MOTOR_LID2, pwmChannelLID1, pwmChannelLID2, 0};
+motor motorL = {MOTOR_L1, MOTOR_L2, pwmChannelL1, pwmChannelL2, 0, false};
+motor motorR = {MOTOR_R1, MOTOR_R2, pwmChannelR1, pwmChannelR2, 0, false};
+motor motorLid = {MOTOR_LID1, MOTOR_LID2, pwmChannelLid1, pwmChannelLid2, 0, false};
 
 const int min_duty = 80;
+const int max_acc = 50;
 
+#define LEDS_PIN 14
+
+const uint8_t num_leds = 24;
+CRGB leds[num_leds];
+uint8_t anim_id;
+
+void setup_motor(motor motor);
+void set_speed(motor*, int);
+void tick_L();
+void tick_R();
+void stop();
 void drive(byte, byte);
-void set_speed(motor, int);
+
 void open_lid();
 void close_lid();
-void brake();
-// void play_audio(byte);
-void stop();
+void stop_lid();
+
+void fill(CRGB);
 void fade_right();
 void fade_left();
-void fill();
-void leds_off();
 
 void setup() {
-  Serial.begin(115200);
+  #ifdef DEBUG_ENABLE
+    Serial.begin(115200);
+  #endif
   SerialBT.begin("Rover");
-  Serial.println("Bluetooth Started! Ready to pair...");
+  DEBUG("Ready");
 
   FastLED.addLeds<WS2811, LEDS_PIN, GRB>(leds, num_leds).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(127);
-  pinMode(motorL.in1, OUTPUT);
-  pinMode(motorL.in2, OUTPUT);
 
-  pinMode(motorR.in1, OUTPUT);
-  pinMode(motorR.in2, OUTPUT);
+  setup_motor(motorL);
+  setup_motor(motorR);
+  setup_motor(motorLid);
 
-  pinMode(motorLid.in1, OUTPUT);
-  pinMode(motorLid.in2, OUTPUT);
-
-  ledcSetup(pwmChannelL1, frequency, resolution);
-  ledcSetup(pwmChannelL2, frequency, resolution);
-  ledcSetup(pwmChannelR1, frequency, resolution);
-  ledcSetup(pwmChannelR2, frequency, resolution);
-  ledcSetup(pwmChannelLID1, frequency, resolution);
-  ledcSetup(pwmChannelLID2, frequency, resolution);
-  
-  ledcAttachPin(motorL.in1, pwmChannelL1);
-  ledcAttachPin(motorL.in2, pwmChannelL2);
-
-  ledcAttachPin(motorR.in1, pwmChannelR1);
-  ledcAttachPin(motorR.in2, pwmChannelR2);
-
-  ledcAttachPin(motorLid.in1, pwmChannelLID1);
-  ledcAttachPin(motorLid.in2, pwmChannelLID2);
-
-  fill();
+  fill(CRGB(255, 0, 0));
 }
 
 
 void loop() {
+  timer.handle();
   static uint8_t buffer[3] = { 0 };
 
   // Check for incoming serial data
   if (SerialBT.available() >= 3) {
     SerialBT.readBytes(buffer, 3);
-
     switch (buffer[0])
     {
     case STOP:
+      DEBUG("Stop");
+      DEBUG(motorL.speed);
+      DEBUG(motorR.speed);
       stop();
-      Serial.println('S');
       break;
     case JOYSTICK:
-      // Serial.println('J');
-      Serial.print("X ");
-      Serial.print(buffer[1]);
-      Serial.print(" Y ");
-      Serial.println(buffer[2]);
+      #ifdef DEBUG_ENABLE
+        char string[16];
+        sprintf(string, "J\t X %d Y %d", buffer[1], buffer[2]);
+        DEBUG(string);
+      #endif
       drive(buffer[1], buffer[2]);
       break;
     case LID:
-      Serial.println('L');
+      DEBUG("Lid");
       if (buffer[1] == LID_OPEN)
           open_lid();
       else 
           close_lid();
       break;
-    case AUDIO:
-      // play_audio(buffer[1]);
-      break;
     default:
-      Serial.println('D');
+      DEBUG("None");
       stop();
       break;
     }
   }
 }
 
-void stop() {
-  set_speed(motorL, 0);
-  set_speed(motorR, 0);
-  fill();
+void setup_motor(motor motor) {
+  ledcSetup(motor.channel1, frequency, resolution);
+  ledcSetup(motor.channel2, frequency, resolution);
+  pinMode(motor.in1, OUTPUT);
+  pinMode(motor.in2, OUTPUT);
+  ledcAttachPin(motor.in1, pwmChannelL1);
+  ledcAttachPin(motor.in2, pwmChannelL2);
 }
+
+int dutyR = 0;
+int dutyL = 0;
+unsigned short idR = 0;
+unsigned short idL = 0;
 
 void drive(byte X, byte Y) {
   int forward = map(Y, 0, 254, -max_speed, max_speed);
   int turn = -map(X, 0, 254, -max_speed, max_speed);
+
   float angle = atan2(forward, turn);
   if(angle < 0) angle += 2*PI;
   int radius = (int) constrain(sqrt(turn * turn +  forward * forward)/2, 0, 127);
 
-  Serial.print("A ");
-  Serial.print(angle);
-  Serial.print(" R ");
-  Serial.println(radius);
+  #ifdef DEBUG_ENABLE
+    char string[32];
+    sprintf(string, "P\t A %f R %d", angle, radius);
+    DEBUG(string);
+  #endif
 
-  int dutyR = constrain(forward+turn, -max_speed, max_speed);
-  int dutyL = constrain(forward-turn, -max_speed, max_speed);
-
+  int _dutyR;
+  int _dutyL;
   float _angle = angle*6;
-  if (in(_angle, 5*PI, 7*PI) && radius > 60) {
-    dutyR = max_speed;
-    dutyL = -max_speed;
+
+  _dutyR = constrain(forward+turn, -max_speed, max_speed);
+  _dutyL = constrain(forward-turn, -max_speed, max_speed);
+  if (in(_angle, 5*PI, 7*PI) && radius > 60) { // right turn
+    _dutyR = -max_speed;
+    _dutyL = max_speed;
     fade_right();
   } 
-  else if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI)) && radius > 60) {
-    dutyR = -max_speed;
-    dutyL = max_speed;
+  else if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI)) && radius > 60) { // left turn
+    _dutyR = max_speed;
+    _dutyL = -max_speed;
     fade_left();
   }
 
-  Serial.print("L ");
-  Serial.print(dutyL);
-  Serial.print(" R ");
-  Serial.println(dutyR);
+  // if (in(dutyL, 1, min_duty)) dutyL = min_duty;
+  // if (in(dutyL, -min_duty, 1)) dutyL = -min_duty;
+  // if (in(dutyR, 1, min_duty)) dutyR = min_duty;
+  // if (in(dutyR, -min_duty, 1)) dutyR = -min_duty;
 
-  // setSpeed(motorL, dutyL);
-  // setSpeed(motorR, dutyR);
-  set_speed(motorL, dutyL); 
-  set_speed(motorR, -dutyR); // right side connection is reversed
+  #ifdef DEBUG_ENABLE
+    char message[32];
+    sprintf(message, "D\t L %d R %d", _dutyL, _dutyR);
+    DEBUG(message);
+  #endif
+
+  if (_dutyL != dutyL) {
+    dutyL = _dutyL;
+    if (idL != 0) {
+      DEBUG("New L");
+      timer.cancel(idL);
+      idL = 0;
+    }
+    idL = timer.setInterval(tick_L, 50);
+  }
+
+  if (_dutyR != dutyR) {
+    dutyR = _dutyR;
+    if (idR != 0) {
+      DEBUG("New R");
+      timer.cancel(idR);
+      idR = 0;
+    }
+    idR = timer.setInterval(tick_R, 50);
+  }
+}
+
+void tick_L() {
+  int speed;
+  int diff = dutyL - motorL.speed;
+  if (diff == 0){
+    timer.cancel(idL);
+    idL = 0;
+    DEBUG("Canceled idL");
+    return;
+  }
+
+  if (diff > 0) {
+    speed = constrain(motorL.speed + max_acc, -max_speed, dutyL);
+  }
+  else if (diff < 0){
+    speed = constrain(motorL.speed - max_acc, dutyL, max_speed);
+  }
+  DEBUG("ticked L");
+  DEBUG(speed);
+  DEBUG(motorL.speed);
+  set_speed(&motorL, speed);
+}
+
+void tick_R() {
+  int speed;
+  int diff = dutyR - motorR.speed;
+  if (diff == 0){
+    timer.cancel(idR);
+    idR = 0;
+    DEBUG("Canceled idR");
+    return;
+  }
+
+  if (diff > 0) {
+    speed = constrain(motorR.speed + max_acc, -max_speed, dutyR);
+  }
+  else if (diff < 0){
+    speed = constrain(motorR.speed - max_acc, dutyR, max_speed);
+  }
+  DEBUG("ticked R");
+  DEBUG(speed);
+  DEBUG(motorR.speed);
+  set_speed(&motorR, speed);
+}
+
+void stop() {
+  // set_speed(motorL, 0);
+  // set_speed(motorR, 0);
+  drive(127, 127);
+  fill(CRGB(255, 0, 0));
+}
+
+unsigned short lidId = 0;
+void stop_lid() {
+  set_speed(&motorLid, 0);
+  lidId = 0;
 }
 
 void open_lid() {
-      Serial.println('O');
-  set_speed(motorLid, max_speed);
+  if (lidId != 0) timer.cancel(lidId);
+  set_speed(&motorLid, max_speed);
+  lidId = timer.setTimeout(stop_lid, 2000);
 }
 
 void close_lid() {
-      Serial.println('C');
-  set_speed(motorLid, -max_speed);
+  if (lidId != 0) timer.cancel(lidId);
+  set_speed(&motorLid, -max_speed);
+  lidId = timer.setTimeout(stop_lid, 2000);
 }
 
-void brake() {
-  set_speed(motorL, max_speed);
-  set_speed(motorR, max_speed);
-}
-
-void set_speed(motor motor, int speed) {
-  if (speed >= 0){
-    if (speed < min_duty) speed = min_duty;
-    ledcWrite(motor.channel1, speed);
-    ledcWrite(motor.channel2, LOW);
+void set_speed(motor *motor, int speed) {
+  if (motor->reversed) speed = -speed;
+  if (in(speed, -min_duty, min_duty)) {
+    ledcWrite(motor->channel1, LOW);
+    ledcWrite(motor->channel2, LOW);
   }
-  else {
-    if (speed > min_duty) speed = -min_duty;
-    ledcWrite(motor.channel2, -speed);
-    ledcWrite(motor.channel1, LOW);
+  else if (speed > min_duty){
+    ledcWrite(motor->channel1, speed);
+    ledcWrite(motor->channel2, LOW);
+  }
+  else if (speed < -min_duty) {
+    ledcWrite(motor->channel2, -speed);
+    ledcWrite(motor->channel1, LOW);
   } 
-}
-
-void leds_off() {
-  for (uint8_t i = 0; i < num_leds; i++)
-  {
-    leds[i] = CRGB(0, 0, 0);
-  }
-  FastLED.show();
+  motor->speed = speed;
+  #ifdef DEBUG_ENABLE
+    char string[16];
+    char m;
+    if(motor->in1 == motorL.in1) m = 'L';
+    else m = 'R';
+    sprintf(string, "Speed\t %c %d", m, motor->speed);
+    DEBUG(string);
+  #endif
 }
 
 void fade_right() {
-  leds_off();
+  fill(CRGB(0, 0, 0));
   for (byte i = 0; i < num_leds / 2; i++)
   {
     leds[i] = CRGB(round(255 * 2 * (num_leds/2-i)/num_leds), 0, 0); 
@@ -232,7 +317,7 @@ void fade_right() {
 }
 
 void fade_left() {
-  leds_off();
+  fill(CRGB(0, 0, 0));
   for (uint8_t i = 0; i < num_leds / 2; i++)
   {
     leds[num_leds/2 + i] = CRGB(round(255 * 2 * i/num_leds), 0, 0); 
@@ -240,10 +325,10 @@ void fade_left() {
   FastLED.show();
 }
 
-void fill() {
+void fill(CRGB color) {
   for (uint8_t i = 0; i < num_leds; i++)
   {
-    leds[i] = CRGB(255, 0, 0);
+    leds[i] = color;
   }
   FastLED.show();
 }
