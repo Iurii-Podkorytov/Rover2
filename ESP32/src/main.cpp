@@ -52,8 +52,8 @@ struct motor {
     bool reversed;
 };
 
-motor motorL = {MOTOR_L1, MOTOR_L2, pwmChannelL1, pwmChannelL2, 0, false};
-motor motorR = {MOTOR_R1, MOTOR_R2, pwmChannelR1, pwmChannelR2, 0, false};
+motor motorL = {MOTOR_L1, MOTOR_L2, pwmChannelL1, pwmChannelL2, 0, true};
+motor motorR = {MOTOR_R1, MOTOR_R2, pwmChannelR1, pwmChannelR2, 0, true};
 motor motorLid = {MOTOR_LID1, MOTOR_LID2, pwmChannelLid1, pwmChannelLid2, 0, false};
 
 const int min_duty = 80;
@@ -83,8 +83,10 @@ void fade_left();
 void setup() {
   #ifdef DEBUG_ENABLE
     Serial.begin(115200);
-  #endif
+    SerialBT.begin("Rover_DEBUG");
+  #else
   SerialBT.begin("Rover");
+  #endif
   DEBUG("Ready");
 
   FastLED.addLeds<WS2811, LEDS_PIN, GRB>(leds, num_leds).setCorrection(TypicalLEDStrip);
@@ -141,8 +143,8 @@ void setup_motor(motor motor) {
   ledcSetup(motor.channel2, frequency, resolution);
   pinMode(motor.in1, OUTPUT);
   pinMode(motor.in2, OUTPUT);
-  ledcAttachPin(motor.in1, pwmChannelL1);
-  ledcAttachPin(motor.in2, pwmChannelL2);
+  ledcAttachPin(motor.in1, motor.channel1);
+  ledcAttachPin(motor.in2, motor.channel2);
 }
 
 int dutyR = 0;
@@ -167,24 +169,20 @@ void drive(byte X, byte Y) {
   int _dutyR;
   int _dutyL;
   float _angle = angle*6;
-
   _dutyR = constrain(forward+turn, -max_speed, max_speed);
   _dutyL = constrain(forward-turn, -max_speed, max_speed);
-  if (in(_angle, 5*PI, 7*PI) && radius > 60) { // right turn
-    _dutyR = -max_speed;
-    _dutyL = max_speed;
-    fade_right();
-  } 
-  else if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI)) && radius > 60) { // left turn
+
+
+  if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI)) && radius > 60) { // left turn
     _dutyR = max_speed;
     _dutyL = -max_speed;
     fade_left();
   }
-
-  // if (in(dutyL, 1, min_duty)) dutyL = min_duty;
-  // if (in(dutyL, -min_duty, 1)) dutyL = -min_duty;
-  // if (in(dutyR, 1, min_duty)) dutyR = min_duty;
-  // if (in(dutyR, -min_duty, 1)) dutyR = -min_duty;
+  else if (in(_angle, 5*PI, 7*PI) && radius > 60) { // right turn
+    _dutyR = -max_speed;
+    _dutyL = max_speed;
+    fade_right();
+  } 
 
   #ifdef DEBUG_ENABLE
     char message[32];
@@ -264,45 +262,37 @@ void stop() {
   fill(CRGB(255, 0, 0));
 }
 
-unsigned short lidId = 0;
-void stop_lid() {
-  set_speed(&motorLid, 0);
-  lidId = 0;
-}
 
 void open_lid() {
-  if (lidId != 0) timer.cancel(lidId);
   set_speed(&motorLid, max_speed);
-  lidId = timer.setTimeout(stop_lid, 2000);
 }
 
 void close_lid() {
-  if (lidId != 0) timer.cancel(lidId);
   set_speed(&motorLid, -max_speed);
-  lidId = timer.setTimeout(stop_lid, 2000);
 }
 
 void set_speed(motor *motor, int speed) {
+  motor->speed = speed;
   if (motor->reversed) speed = -speed;
-  if (in(speed, -min_duty, min_duty)) {
-    ledcWrite(motor->channel1, LOW);
-    ledcWrite(motor->channel2, LOW);
-  }
-  else if (speed > min_duty){
+  if (speed > 10){
+    if (speed < min_duty) speed = min_duty;
     ledcWrite(motor->channel1, speed);
     ledcWrite(motor->channel2, LOW);
   }
-  else if (speed < -min_duty) {
+  else if (speed < -10) {
+    if (speed > -min_duty) speed = -min_duty;
     ledcWrite(motor->channel2, -speed);
     ledcWrite(motor->channel1, LOW);
-  } 
-  motor->speed = speed;
+  } else {
+    ledcWrite(motor->channel2, LOW);
+    ledcWrite(motor->channel1, LOW);
+  }
   #ifdef DEBUG_ENABLE
     char string[16];
     char m;
     if(motor->in1 == motorL.in1) m = 'L';
     else m = 'R';
-    sprintf(string, "Speed\t %c %d", m, motor->speed);
+    sprintf(string, "Speed\t %c %d", m, speed);
     DEBUG(string);
   #endif
 }
