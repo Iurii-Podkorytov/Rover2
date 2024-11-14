@@ -4,7 +4,7 @@
 #include "FastLED.h"
 #include <AsyncTimer.h>
 
-#define DEBUG_ENABLE // Un-comment for debug
+// #define DEBUG_ENABLE // Un-comment for debug
 #ifdef DEBUG_ENABLE
 #define DEBUG(x) Serial.println(x)
 #else
@@ -19,6 +19,7 @@
 #define LID 2
 #define LID_OPEN 1
 #define LID_CLOSE 0
+#define AUDIO 3
 
 AsyncTimer timer;
 BluetoothSerial SerialBT;
@@ -63,7 +64,6 @@ const int max_acc = 50;
 
 const uint8_t num_leds = 24;
 CRGB leds[num_leds];
-uint8_t anim_id;
 
 void setup_motor(motor motor);
 void set_speed(motor*, int);
@@ -74,7 +74,6 @@ void drive(byte, byte);
 
 void open_lid();
 void close_lid();
-void stop_lid();
 
 void fill(CRGB);
 void fade_right();
@@ -130,6 +129,8 @@ void loop() {
       else 
           close_lid();
       break;
+    case AUDIO:
+      break;
     default:
       DEBUG("None");
       stop();
@@ -169,20 +170,54 @@ void drive(byte X, byte Y) {
   int _dutyR;
   int _dutyL;
   float _angle = angle*6;
-  _dutyR = constrain(forward+turn, -max_speed, max_speed);
-  _dutyL = constrain(forward-turn, -max_speed, max_speed);
-
-
-  if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI)) && radius > 60) { // left turn
-    _dutyR = max_speed;
-    _dutyL = -max_speed;
+  if((in(_angle, 0, PI) || in(_angle, 11*PI, 12*PI))) { // left turn
+    if(radius > 60) {
+      _dutyL = -max_speed; 
+      _dutyR = max_speed; 
+    } else {
+      _dutyL = 0; 
+      _dutyR = 0; 
+    }
+    // _dutyL = -floor(max_speed * radius / 127);
+    // _dutyR = floor(max_speed * radius / 127); 
     fade_left();
   }
-  else if (in(_angle, 5*PI, 7*PI) && radius > 60) { // right turn
-    _dutyR = -max_speed;
-    _dutyL = max_speed;
+  else if (in(_angle, PI, 2*PI)) { // forward-left
+    _dutyL = min_duty;
+    _dutyR = floor(max_speed * radius / 127); 
+  }
+  else if (in(_angle, 2*PI, 4*PI)) { // forward
+    _dutyL = floor(max_speed * radius / 127);
+    _dutyR = floor(max_speed * radius / 127); 
+  }
+  else if (in(_angle, 4*PI, 5*PI)) { // forward-right
+    _dutyL = floor(max_speed * radius / 127); 
+    _dutyR = min_duty;
+  }
+  else if (in(_angle, 5*PI, 7*PI)) { // right turn
+    if(radius > 60) {
+      _dutyL = max_speed; 
+      _dutyR = -max_speed; 
+    } else {
+      _dutyL = 0; 
+      _dutyR = 0; 
+    }
+    // _dutyL = floor(max_speed * radius / 127);
+    // _dutyR = -floor(max_speed * radius / 127); 
     fade_right();
   } 
+  else if (in(_angle, 7*PI, 8*PI)) { // back-right
+    _dutyL = -floor(max_speed * radius / 127); 
+    _dutyR = -min_duty;
+  }
+  else if (in(_angle, 8*PI, 10*PI)) { // back
+    _dutyL = -floor(max_speed * radius / 127);
+    _dutyR = -floor(max_speed * radius / 127); 
+  }
+  else if (in(_angle, 10*PI, 11*PI)) { // back-left
+    _dutyL = -min_duty;
+    _dutyR = -floor(max_speed * radius / 127); 
+  }
 
   #ifdef DEBUG_ENABLE
     char message[32];
